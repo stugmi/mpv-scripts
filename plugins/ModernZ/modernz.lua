@@ -111,6 +111,7 @@ local user_opts = {
     ontop_button = true,                   -- show window on top button
     ontop_in_topbar = false,               -- move ontop button to top bar when ontop is active
     screenshot_button = true,              -- show screenshot button
+    clip_button = true,                    -- show Clip button (clipper)
 
     download_button = true,                -- show download button on web videos (requires yt-dlp and ffmpeg)
     download_path = "~~desktop/mpv",       -- default download directory for videos (https://mpv.io/manual/master/#paths)
@@ -294,6 +295,10 @@ local user_opts = {
     -- screenshot button mouse actions
     screenshot_mbtn_left_command = "osd-msg screenshot video",
 
+    -- clip button mouse actions (clipper)
+    clip_mbtn_left_command = "script-binding clipper/open",
+    clip_mbtn_right_command = "script-binding clipper/open-live",
+
     -- loop file button mouse actions
     file_loop_mbtn_left_command = "osd-msg cycle-values loop-file inf no",
     file_loop_mbtn_right_command = "osd-msg cycle-values loop-playlist inf no",
@@ -376,8 +381,8 @@ local function build_icons(theme_name, style)
         ontop_on        = o("pip"),
         ontop_off       = o("pip_exit"),
         info            = o("info"),
-        fullscreen      = o("fullscreen"),
-        fullscreen_exit = o("fullscreen_exit"),
+        fullscreen      = "material_fullscreen",
+        fullscreen_exit = "material_fullscreen_exit",
 
         zoom_in         = o("zoom_in"),
         zoom_out        = o("zoom_out"),
@@ -652,6 +657,8 @@ local state = {
     title_max_w = nil,
     windowtitle_max_w = nil,
     chapter_title_max_w = nil,
+    twitch = nil,
+    twitch_live_edge = nil,
 }
 
 local logo_lines = {
@@ -983,6 +990,65 @@ end
 
 local function cache_enabled()
     return state.demuxer_cache_state and #state.demuxer_cache_state["seekable-ranges"] > 0
+end
+
+-- twitch-rewind (user-data/twitch) integration. While watching live, the seekbar spans the whole broadcast
+-- (VOD time 0 .. live edge) once the broadcast's VOD is known: twitch-rewind publishes dvr_offset, the live
+-- pts at VOD time 0. Seeking left of the live cache then switches to the VOD playlist.
+local function is_twitch_live_edge()
+    if not state.twitch or state.twitch.mode ~= "live" then return false end
+    if not state.duration or state.duration <= 0 then return true end
+    local pt = mp.get_property_number("playback-time")
+    if not pt then return true end
+    return (state.duration - pt) < 15
+end
+
+-- offset, length of the broadcast timeline while live, nil when the plain mpv timeline applies
+local function twitch_span()
+    local tw = state.twitch
+    if not tw or tw.mode ~= "live" or not tw.dvr_offset then return nil end
+    local dur = state.duration
+    if not dur or dur <= tw.dvr_offset + 1 then return nil end
+    return tw.dvr_offset, dur - tw.dvr_offset
+end
+
+-- slider percentage <-> mpv time-pos, on whichever timeline the seekbar shows
+local function slider_pct_to_pos(pct)
+    local off, total = twitch_span()
+    if off then return off + total * pct / 100 end
+    return (state.duration or 0) * pct / 100
+end
+
+local function pos_to_slider_pct(pos)
+    local off, total = twitch_span()
+    if off then return math.max(0, math.min(100, (pos - off) / total * 100)) end
+    if not state.duration or state.duration <= 0 then return 0 end
+    return pos / state.duration * 100
+end
+
+local function is_outside_live_cache(pct)
+    if not state.twitch or state.twitch.mode ~= "live" or not state.duration or state.duration <= 0 then
+        return false
+    end
+    local dcs = state.demuxer_cache_state
+    local rs = dcs and dcs["seekable-ranges"]
+    if not rs or #rs == 0 then return true end
+    local want = slider_pct_to_pos(pct)
+    local pos = mp.get_property_number("playback-time") or state.duration
+    local cur = rs[#rs]
+    for _, r in ipairs(rs) do
+        if pos >= r.start - 1 and pos <= r["end"] + 1 then cur = r; break end
+    end
+    return want < cur.start - 1.0
+end
+
+-- seek to a slider percentage: absolute-percent normally, absolute seconds on the broadcast timeline
+local function seek_to_slider(pct, exact)
+    if twitch_span() then
+        mp.commandv("seek", slider_pct_to_pos(pct), "absolute" .. (exact and "+exact" or ""))
+    else
+        mp.commandv("seek", pct, "absolute-percent" .. (exact and "+exact" or ""))
+    end
 end
 
 local function set_margin_offset(prop, offset)
@@ -1597,7 +1663,8 @@ local function render_elements(master_ass, osc_vis, wc_vis)
             and element.name ~= "title"
             and element.name ~= "chapter_title"
             and element.name ~= "time_codes"
-            and element.name ~= "cache_info" then
+            and element.name ~= "cache_info"
+            and element.name ~= "twitch_live" then
             local is_clickable = element.eventresponder and (
                 element.eventresponder["mbtn_left_down"] ~= nil or
                 element.eventresponder["mbtn_left_up"] ~= nil
@@ -1651,6 +1718,12 @@ local function render_elements(master_ass, osc_vis, wc_vis)
                 draw_seekbar_ranges(element, elem_ass, handle_x, handle_radius)
                 draw_ab_loop_range(element, elem_ass)
                 draw_seekbar_handle(element, elem_ass, handle_x, handle_radius, anim_override, is_active) -- draw handle on top of progress
+
+                if element.name == "seekbar" and state.twitch and state.twitch.can_live ~= false and not is_twitch_live_edge() then
+                    local dot_r = math.max(3.5, (seekbar_height_style.height or 4) * 0.85)
+                    begin_draw_layer(element, elem_ass, "#E91916", anim_override)
+                    ass_draw_cir_cw(elem_ass, element.slider.max.ele_pos, elem_geo.h / 2, dot_r)
+                end
 
                 elem_ass:draw_stop()
 
@@ -1779,23 +1852,66 @@ local function render_elements(master_ass, osc_vis, wc_vis)
             local button_lo = element.layout.button
             local is_clickable = element.eventresponder and (element.eventresponder["mbtn_left_down"] ~= nil or element.eventresponder["mbtn_left_up"] ~= nil)
             local hovered = mouse_hit(element) and is_clickable and element.enabled and state.mouse_down_counter == 0
-            local hoverstyle = button_lo.hoverstyle
-            if hovered and (hover_effects.size or hover_effects.color) then
-                -- remove font scale tags for these elements, it looks out of place
-                if element.name == "title" or element.name == "time_codes" or element.name == "chapter_title" or element.name == "cache_info" or element.name == "speed" then
-                    hoverstyle = hoverstyle:gsub("\\fscx%d+\\fscy%d+", "")
-                end
-                elem_ass:append(hoverstyle .. buttontext)
-            else
-                elem_ass:append(buttontext)
-            end
+            if element.name == "twitch_live" then
+                local bx1, by1, bx2, by2 = element.hitbox.x1, element.hitbox.y1, element.hitbox.x2, element.hitbox.y2
+                local cy = (by1 + by2) / 2
+                local is_live = is_twitch_live_edge()
+                local bg_color = (is_live or hovered) and "#E91916" or "#1F1F23"
+                local bord_str = (not is_live and not hovered) and ("\\bord1\\3c&H" .. osc_color_convert("#53535F") .. "&") or "\\bord0"
 
-            -- apply blur effect if "glow" is in hover effects
-            if hovered and hover_effects.glow then
-                local shadow_ass = assdraw.ass_new()
-                shadow_ass:merge(style_ass)
-                shadow_ass:append("{\\blur" .. user_opts.button_glow_amount .. "}" .. hoverstyle .. buttontext)
-                elem_ass:merge(shadow_ass)
+                elem_ass = assdraw.ass_new()
+                elem_ass:append("{}")
+                elem_ass:new_event()
+                elem_ass:pos(0, 0)
+                elem_ass:an(7)
+                ass_append_alpha(elem_ass, element.layout.alpha, 0, nil, anim_override)
+                elem_ass:append("{\\blur0" .. bord_str .. "\\1c&H" .. osc_color_convert(bg_color) .. "&}")
+                elem_ass:draw_start()
+                elem_ass:round_rect_cw(bx1, by1, bx2, by2, 3)
+                elem_ass:draw_stop()
+
+                elem_ass:append("{}")
+                elem_ass:new_event()
+                elem_ass:pos(is_live and ((bx1 + bx2) / 2) or (bx1 + 8), cy)
+                elem_ass:an(is_live and 5 or 4)
+                ass_append_alpha(elem_ass, element.layout.alpha, 0, nil, anim_override)
+                elem_ass:append("{\\blur0\\bord0\\1c&HFFFFFF&\\fs12\\b1\\fn" .. user_opts.font .. "}LIVE")
+
+                if not is_live then
+                    elem_ass:append("{}")
+                    elem_ass:new_event()
+                    elem_ass:pos(0, 0)
+                    elem_ass:an(7)
+                    ass_append_alpha(elem_ass, element.layout.alpha, 0, nil, anim_override)
+                    elem_ass:append("{\\blur0\\bord0\\1c&HFFFFFF&}")
+                    elem_ass:draw_start()
+                    local rx = bx2 - 7
+                    local tri_r = rx - 3.5
+                    elem_ass:move_to(tri_r - 6, cy - 4)
+                    elem_ass:line_to(tri_r, cy)
+                    elem_ass:line_to(tri_r - 6, cy + 4)
+                    elem_ass:rect_cw(rx - 2, cy - 4, rx, cy + 4)
+                    elem_ass:draw_stop()
+                end
+            else
+                local hoverstyle = button_lo.hoverstyle
+                if hovered and (hover_effects.size or hover_effects.color) then
+                    -- remove font scale tags for these elements, it looks out of place
+                    if element.name == "title" or element.name == "time_codes" or element.name == "chapter_title" or element.name == "cache_info" or element.name == "speed" then
+                        hoverstyle = hoverstyle:gsub("\\fscx%d+\\fscy%d+", "")
+                    end
+                    elem_ass:append(hoverstyle .. buttontext)
+                else
+                    elem_ass:append(buttontext)
+                end
+
+                -- apply blur effect if "glow" is in hover effects
+                if hovered and hover_effects.glow then
+                    local shadow_ass = assdraw.ass_new()
+                    shadow_ass:merge(style_ass)
+                    shadow_ass:append("{\\blur" .. user_opts.button_glow_amount .. "}" .. hoverstyle .. buttontext)
+                    elem_ass:merge(shadow_ass)
+                end
             end
 
             -- add tooltip for button elements
@@ -1818,8 +1934,8 @@ local function render_elements(master_ass, osc_vis, wc_vis)
                     end
 
                     local tx = hb and (hb.x1 + hb.x2) / 2 or (element.hitbox.x1 + element.hitbox.x2) / 2
-                    local seekbar_ref = (state.seekbar_element and state.seekbar_element.hitbox) and state.seekbar_element or element
-                    local image_mode_offset = (seekbar_ref == element) and 10 or 0
+                    local seekbar_ref = (element.name ~= "twitch_live" and state.seekbar_element and state.seekbar_element.hitbox) and state.seekbar_element or element
+                    local image_mode_offset = (seekbar_ref == element and element.name ~= "twitch_live") and 10 or 0
                     local ty = seekbar_ref.hitbox.y1 - user_opts.tooltip_height_offset - image_mode_offset
 
                     local osd_w = mp.get_property_number("osd-width")
@@ -2231,6 +2347,9 @@ layouts["default"] = function ()
     )
 
     local time_codes_width = get_time_codes_width()
+    local twitch_live_vis = state.twitch ~= nil and state.twitch.can_live ~= false
+    local twitch_live_w = is_twitch_live_edge() and 42 or 58
+    local twitch_pad = twitch_live_vis and (twitch_live_w + 15) or 0
     local chapter_title_y, title_y
     if user_opts.chapter_above_title then
         title_y = user_opts.osc_height + title_offset
@@ -2241,7 +2360,7 @@ layouts["default"] = function ()
     end
 
     -- osc title
-    local title_w = (no_chapter or not chapter_index or user_opts.chapter_above_title) and (osc_geo.w - 60 - time_codes_width) or (osc_geo.w - 50)
+    local title_w = ((no_chapter or not chapter_index or user_opts.chapter_above_title) and (osc_geo.w - 60 - time_codes_width) or (osc_geo.w - 50)) - twitch_pad
     state.title_max_w = title_w
     if title_w < 0 then title_w = 0 end
     elements["title"].visible = not no_title
@@ -2251,6 +2370,15 @@ layouts["default"] = function ()
     lo.layer = 48
     lo.alpha[3] = 0
     lo.style = string.format("%s{\\clip(%f,%f,%f,%f)}", osc_styles.title, 0, 0, geo.x + geo.w, geo.y + geo.h)
+
+    elements["twitch_live"].visible = twitch_live_vis
+    if twitch_live_vis then
+        lo = add_layout("twitch_live")
+        lo.geometry = {x = osc_geo.w - 15, y = refY - user_opts.osc_height - 14, an = 3, w = twitch_live_w, h = 20}
+        lo.layer = 48
+        lo.alpha[3] = 0
+        lo.style = osc_styles.time
+    end
 
     -- chapter title
     if user_opts.show_chapter_title then
@@ -2335,7 +2463,8 @@ layouts["default"] = function ()
     end
     elements["time_codes"].visible = (state.duration or 0) > 0
     lo = add_layout("time_codes")
-    lo.geometry = {x = (narrow_win and (osc_geo.w - 25) or time_codes_x), y = refY - time_codes_y, an = (narrow_win and 3 or 4), w = time_codes_width, h = user_opts.time_font_size}
+    local narrow_tc_x = twitch_live_vis and (osc_geo.w - 15 - twitch_live_w - 10) or (osc_geo.w - 25)
+    lo.geometry = {x = (narrow_win and narrow_tc_x or time_codes_x), y = refY - time_codes_y, an = (narrow_win and 3 or 4), w = time_codes_width, h = user_opts.time_font_size}
     lo.layer = 48
     lo.alpha[3] = 0
     lo.style = osc_styles.time
@@ -2402,6 +2531,7 @@ layouts["default"] = function ()
     right_side_button("info", 650, user_opts.info_button)
     right_side_button("ontop", 750, user_opts.ontop_button and not (window_controls_enabled() and user_opts.ontop_in_topbar and state.ontop))
     right_side_button("screenshot", 850, user_opts.screenshot_button)
+    right_side_button("clip", 850, user_opts.clip_button)  -- clipper
     right_side_button("file_loop", 950, user_opts.loop_button)
     right_side_button("shuffle", 1050, user_opts.shuffle_button)
     right_side_button("speed", 1150, user_opts.speed_button, osc_styles.speed, 42)
@@ -2503,7 +2633,9 @@ layouts["compact"] = function ()
     end
 
     -- osc title
-    local title_w = osc_geo.w - 50
+    local twitch_live_vis = state.twitch ~= nil and state.twitch.can_live ~= false
+    local twitch_live_w = is_twitch_live_edge() and 42 or 58
+    local title_w = osc_geo.w - 50 - (twitch_live_vis and (twitch_live_w + 15) or 0)
     state.title_max_w = title_w
     if title_w < 0 then title_w = 0 end
     elements["title"].visible = not no_title
@@ -2513,6 +2645,15 @@ layouts["compact"] = function ()
     lo.layer = 48
     lo.alpha[3] = 0
     lo.style = string.format("%s{\\clip(%f,%f,%f,%f)}", osc_styles.title, 0, 0, geo.x + geo.w, geo.y + geo.h)
+
+    elements["twitch_live"].visible = twitch_live_vis
+    if twitch_live_vis then
+        lo = add_layout("twitch_live")
+        lo.geometry = {x = osc_geo.w - 15, y = refY - user_opts.osc_height - 14, an = 3, w = twitch_live_w, h = 20}
+        lo.layer = 48
+        lo.alpha[3] = 0
+        lo.style = osc_styles.time
+    end
 
     -- chapter title
     if user_opts.show_chapter_title then
@@ -2878,9 +3019,20 @@ layouts["seekbar"] = function ()
 
     -- time codes
     local time_codes_width = get_time_codes_width()
+    local twitch_live_vis = state.twitch ~= nil and state.twitch.can_live ~= false
+    local twitch_live_w = is_twitch_live_edge() and 42 or 58
+    elements["twitch_live"].visible = twitch_live_vis
+    if twitch_live_vis then
+        lo = add_layout("twitch_live")
+        lo.geometry = {x = osc_geo.w - 15, y = refY - first_row_y - 14, an = 3, w = twitch_live_w, h = 20}
+        lo.layer = 48
+        lo.alpha[3] = 0
+        lo.style = osc_styles.time
+    end
+
     elements["time_codes"].visible = (state.duration or 0) > 0
     lo = add_layout("time_codes")
-    lo.geometry = {x = osc_geo.w - 25, y = refY - first_row_y - second_row_y, an = 3, w = time_codes_width, h = user_opts.time_font_size}
+    lo.geometry = {x = twitch_live_vis and (osc_geo.w - 15 - twitch_live_w - 10) or (osc_geo.w - 25), y = refY - first_row_y - second_row_y, an = 3, w = time_codes_width, h = user_opts.time_font_size}
     lo.layer = 48
     lo.alpha[3] = 0
     lo.style = osc_styles.time
@@ -3050,8 +3202,8 @@ local function build_cache_seek_ranges()
     local nranges = {}
     for _, range in ipairs(state.demuxer_cache_state["seekable-ranges"]) do
         nranges[#nranges + 1] = {
-            ["start"] = 100 * range["start"] / state.duration,
-            ["end"]   = 100 * range["end"]   / state.duration,
+            ["start"] = pos_to_slider_pct(range["start"]),
+            ["end"]   = pos_to_slider_pct(range["end"]),
         }
     end
     return nranges
@@ -3209,7 +3361,8 @@ local function osc_init()
     --play control buttons
     --play_pause
     ne = new_element("play_pause", "button")
-    ne.content = function () return state.eof_reached and icons.replay or (state.pause and not state.playing_and_seeking and icons.play) or icons.pause end
+    local sharp_font = "{\\fnMaterial-Design-Iconic-Font}"
+    ne.content = function () return state.eof_reached and icons.replay or (state.pause and not state.playing_and_seeking and sharp_font .. "\239\142\170") or sharp_font .. "\239\142\167" end
     bind_buttons("play_pause")
     ne.eventresponder["mbtn_left_up"] = function ()
         if state.eof_reached then
@@ -3411,6 +3564,24 @@ local function osc_init()
     ne.tooltipF = locale.screenshot
     bind_buttons("screenshot")
 
+    -- clip (clipper)
+    ne = new_element("clip", "button")
+    ne.content = "{\\fnSegoe Fluent Icons}\238\163\134"
+    ne.tooltipF = "Clip"
+    bind_buttons("clip")
+
+    -- Twitch Live / Skip to Live button
+    ne = new_element("twitch_live", "button")
+    ne.enabled = true
+    ne.tooltipF = function ()
+        return (state.twitch and state.twitch.can_live ~= false and not is_twitch_live_edge()) and "Skip to Live" or nil
+    end
+    ne.eventresponder["mbtn_left_up"] = function ()
+        if state.twitch and state.twitch.can_live ~= false and not is_twitch_live_edge() then
+            mp.commandv("script-message-to", "twitch_rewind", "live")
+        end
+    end
+
     --file_loop
     ne = new_element("file_loop", "button")
     ne.content = function() return state.file_loop and icons.loop_on or icons.loop_off end
@@ -3487,6 +3658,7 @@ local function osc_init()
 
     --seekbar
     ne = new_element("seekbar", "slider")
+    local seekbar_el = ne
     ne.enabled = mp.get_property("percent-pos") ~= nil
     ne.thumbnailable = true
     ne.slider.markerF = function ()
@@ -3502,27 +3674,41 @@ local function osc_init()
         end
     end
     ne.slider.posF = function ()
+        if seekbar_el.state.dvr_drag_pos ~= nil then return seekbar_el.state.dvr_drag_pos end
         if state.eof_reached then return 100 end
+        if twitch_span() then return pos_to_slider_pct(mp.get_property_number("playback-time", 0)) end
         return mp.get_property_number("percent-pos")
     end
     ne.slider.tooltipF = function (pos)
-        if state.duration ~= nil and pos ~= nil then return format_time(state.duration * (pos / 100)) end
+        if state.duration ~= nil and pos ~= nil then
+            local off, total = twitch_span()
+            if off then
+                -- broadcast time, as on twitch.tv
+                if total * (1 - pos / 100) < 2 then return "Live" end
+                return format_time(total * (pos / 100))
+            end
+            return format_time(state.duration * (pos / 100))
+        end
         return ""
     end
     ne.slider.seekRangesF = build_cache_seek_ranges
     ne.eventresponder["mouse_move"] = function (element)
         if not element.state.mbtnleft then return end -- allow drag for mbtnleft only!
         state.playing_and_seeking = true
+        if element.state.dvr_drag_pos ~= nil then
+            element.state.dvr_drag_pos = get_slider_value(element)
+            return
+        end
         if not mp.get_property_bool("pause") and user_opts.mouse_seek_pause then
             mp.commandv("cycle", "pause")
         end
         local seekto = get_slider_value(element)
+        if is_outside_live_cache(seekto) then
+            element.state.dvr_drag_pos = seekto
+            return
+        end
         if element.state.lastseek == nil or element.state.lastseek ~= seekto then
-            local flags = "absolute-percent"
-            if not user_opts.seekbarkeyframes then
-                flags = flags .. "+exact"
-            end
-            mp.commandv("seek", seekto, flags)
+            seek_to_slider(seekto, not user_opts.seekbarkeyframes)
             element.state.lastseek = seekto
         end
     end
@@ -3530,16 +3716,36 @@ local function osc_init()
         element.state.mbtnleft = true
         element.state.was_paused = mp.get_property_bool("pause")
         state.playing_and_seeking = false
-        mp.commandv("seek", get_slider_value(element), "absolute-percent+exact")
+        local pos = get_slider_value(element)
+        if is_outside_live_cache(pos) then
+            element.state.dvr_drag_pos = pos
+        else
+            element.state.dvr_drag_pos = nil
+            seek_to_slider(pos, true)
+        end
     end
     ne.eventresponder["shift+mbtn_left_down"] = function (element)
         element.state.mbtnleft = true
         element.state.was_paused = mp.get_property_bool("pause")
         state.playing_and_seeking = false
-        mp.commandv("seek", get_slider_value(element), "absolute-percent")
+        local pos = get_slider_value(element)
+        if is_outside_live_cache(pos) then
+            element.state.dvr_drag_pos = pos
+        else
+            element.state.dvr_drag_pos = nil
+            seek_to_slider(pos, false)
+        end
     end
     ne.eventresponder["mbtn_left_up"] = function (element)
         element.state.mbtnleft = false
+        local dvr_pos = element.state.dvr_drag_pos
+        element.state.dvr_drag_pos = nil
+        if dvr_pos ~= nil then
+            -- left of the live cache: twitch-rewind switches to the broadcast's VOD playlist
+            state.playing_and_seeking = false
+            mp.commandv("script-message-to", "twitch_rewind", "seek-percent", tostring(dvr_pos), element.state.was_paused and "yes" or "no")
+            return
+        end
         if state.playing_and_seeking then
             -- only unpause if the video was playing before the drag started
             if not element.state.was_paused and not mp.get_property_bool("eof-reached") and user_opts.mouse_seek_pause then
@@ -3566,6 +3772,7 @@ local function osc_init()
     end
     ne.eventresponder["reset"] = function (element)
         element.state.lastseek = nil
+        element.state.dvr_drag_pos = nil
         if element.state.mbtnleft then
             element.state.mbtnleft = false
             if state.playing_and_seeking then
@@ -3584,6 +3791,7 @@ local function osc_init()
     ne.slider.markerF = function () return {} end
     ne.slider.posF = function ()
         if state.eof_reached then return 100 end
+        if twitch_span() then return pos_to_slider_pct(mp.get_property_number("playback-time", 0)) end
         return mp.get_property_number("percent-pos")
     end
     ne.slider.tooltipF = function() return "" end
@@ -3601,6 +3809,15 @@ local function osc_init()
         local playtime_remaining = state.tc_left_rem and mp.get_property_number("playtime-remaining", 0) or playback_time
         local prefix = state.tc_left_rem and (user_opts.unicodeminus and UNICODE_MINUS or "-") or ""
 
+        -- live with a known VOD: elapsed broadcast time / broadcast length
+        local dvr_off, dvr_total = twitch_span()
+        local shown_duration = state.duration
+        if dvr_off then
+            playback_time = math.max(0, playback_time - dvr_off)
+            playtime_remaining = state.tc_left_rem and math.max(0, dvr_total - playback_time) or playback_time
+            shown_duration = dvr_total
+        end
+
         -- call request_init() only when needed to update time code width
         if user_opts.time_format ~= "fixed" and playback_time then
             local hour_or_more = playback_time >= 3600
@@ -3610,7 +3827,7 @@ local function osc_init()
             end
         end
 
-        return prefix .. format_time(playtime_remaining) .. " / " .. format_time(state.duration)
+        return prefix .. format_time(playtime_remaining) .. " / " .. format_time(shown_duration)
     end
     ne.eventresponder["mbtn_left_up"] = function()
         state.tc_left_rem = not state.tc_left_rem
@@ -4218,7 +4435,19 @@ end)
 mp.observe_property("display-fps", "number", set_tick_delay)
 observe_cached("demuxer-cache-state", request_tick)
 mp.observe_property("vo-configured", "bool", request_tick)
-mp.observe_property("playback-time", "number", request_tick)
+mp.observe_property("user-data/twitch", "native", function(_, val)
+    state.twitch = type(val) == "table" and val or nil
+    state.twitch_live_edge = is_twitch_live_edge()
+    request_init()
+end)
+mp.observe_property("playback-time", "number", function()
+    local edge = is_twitch_live_edge()
+    if state.twitch and edge ~= state.twitch_live_edge then
+        state.twitch_live_edge = edge
+        request_init()
+    end
+    request_tick()
+end)
 observe_cached("osd-dimensions", request_init_resize)
 observe_cached("osd-scale-by-window", request_init_resize)
 mp.observe_property("touch-pos", "native", handle_touch)
