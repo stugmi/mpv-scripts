@@ -29,6 +29,7 @@ FILES = [
     (PLUGINS / "ModernZ" / "modernz.lua", "scripts/modernz.lua"),
     (PLUGINS / "ModernZ" / "modernz-icons.ttf", "fonts/modernz-icons.ttf"),
     (ROOT / "assets" / "Material-Design-Iconic-Font.ttf", "fonts/Material-Design-Iconic-Font.ttf"),
+    (ROOT / "assets" / "OFL.txt", "fonts/Material-Design-Iconic-Font-OFL.txt"),
 ]
 # name before the rename -> name now
 LEGACY = {"twitch-dvr": "twitch-rewind", "clip-window": "clipper"}

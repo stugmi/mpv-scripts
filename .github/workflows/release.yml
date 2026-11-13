@@ -2,12 +2,13 @@ name: Build zip
 
 on:
   push:
+    branches: [master, main]
     tags: ["v*"]
-  workflow_dispatch:
   pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   package:
@@ -19,6 +20,15 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Syntax checks
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq luajit
+          python -m py_compile tools/*.py plugins/clipper/scripts/clipper/*.py
+          for f in plugins/clipper/scripts/clipper/*.lua plugins/twitch-rewind/scripts/twitch-rewind/main.lua plugins/ModernZ/modernz.lua; do
+            luajit -bl "$f" > /dev/null
+          done
+
       - name: Version label
         id: version
         run: |
@@ -29,16 +39,20 @@ jobs:
           fi
 
       - name: Build zip
-        run: python tools/package.py --version "${{ steps.version.outputs.label }}"
+        run: python tools/package.py --out dist --version "${{ steps.version.outputs.label }}"
 
-      - name: Smoke test (install into an empty mpv folder)
+      - name: Check the zip contents
+        run: python tools/check_zip.py dist/*.zip
+
+      - name: Smoke test (extract into an empty folder, then run the installer over it)
         run: |
+          mkdir -p "$RUNNER_TEMP/from-zip"
+          unzip -q dist/*.zip -d "$RUNNER_TEMP/from-zip"
+          test -f "$RUNNER_TEMP/from-zip/scripts/twitch-rewind/main.lua"
           mkdir -p "$RUNNER_TEMP/mpv-test"
+          python tools/install.py --target "$RUNNER_TEMP/mpv-test" --dry-run
           python tools/install.py --target "$RUNNER_TEMP/mpv-test"
-          test -f "$RUNNER_TEMP/mpv-test/scripts/twitch-rewind/main.lua"
-          test -f "$RUNNER_TEMP/mpv-test/scripts/clipper/main.lua"
-          test -f "$RUNNER_TEMP/mpv-test/scripts/modernz.lua"
-          test -f "$RUNNER_TEMP/mpv-test/fonts/Material-Design-Iconic-Font.ttf"
+          python tools/install.py --target "$RUNNER_TEMP/mpv-test" | grep -q "Already up to date"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -46,9 +60,20 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
-      - name: Attach to the release
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2
+  release:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: twitch-rewind-clipper-*
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
           generate_release_notes: true

@@ -35,9 +35,9 @@ Each plugin mirrors the mpv config folder it installs into:
 plugins/twitch-rewind/   scripts/twitch-rewind/  script-opts/twitch-rewind.conf  README.md
 plugins/clipper/         scripts/clipper/        script-opts/clipper.conf        README.md  docs/
 plugins/ModernZ/         ModernZ with the Twitch/Clip changes (upstream layout; see below)
-tools/                   install.py, package.py
-assets/                  Material icon font used by the ModernZ fork
-.github/workflows/       release.yml: builds the zip on every push of a `v*` tag and attaches it to the release
+tools/                   install.py, package.py, check_zip.py
+assets/                  Material Design Iconic Font (+ its OFL license), used by the ModernZ fork
+.github/workflows/       release.yml: checks and builds the zip on every push and pull request; a `v*` tag also publishes it as a release
 ```
 
 `git diff d93e5b3 -- plugins/ModernZ` lists every change made to ModernZ; that commit is the unmodified upstream copy.
@@ -48,4 +48,4 @@ assets/                  Material icon font used by the ModernZ fork
 
 ## License
 
-twitch-rewind and clipper are released under the [WTFPL](LICENSE). The ModernZ fork stays under its upstream LGPL-2.1 (`plugins/ModernZ/LICENSE`).
+twitch-rewind and clipper are released under the [WTFPL](LICENSE). The ModernZ fork stays under its upstream LGPL-2.1 (`plugins/ModernZ/LICENSE`). The bundled Material Design Iconic Font is under the SIL OFL 1.1 (`assets/OFL.txt`). Each is shipped with its license in the zip.
