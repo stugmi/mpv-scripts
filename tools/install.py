@@ -8,10 +8,12 @@
 Copies twitch-rewind, clipper and the patched ModernZ over the installed versions. An installed
 modernz.lua that differs is kept as modernz.lua.bak first. Config files (script-opts/*.conf, mpv.conf)
 are never overwritten. The plugins used to be called twitch-dvr and clip-window: those installed
-folders are removed (mpv would load both generations) and an existing twitch-dvr.conf / clip-window.conf
-is renamed to the new name. Close mpv before running so no file is locked.
+folders are moved to backup-<name>-<date>/ next to scripts/ (mpv would load both generations), an
+existing twitch-dvr.conf / clip-window.conf is renamed to the new name, and input.conf lines that use
+the old script names are listed. Close mpv before running so no file is locked.
 """
 import argparse
+import datetime
 import os
 import shutil
 import sys
@@ -40,6 +42,9 @@ def collect():
         for src in sorted(p for p in script_dir.iterdir() if p.is_file()):
             pairs.append((src, f"scripts/{name}/{src.name}"))
         pairs.append((plugin / "README.md", f"scripts/{name}/README.md"))
+    pairs.append((PLUGINS / "ModernZ" / "LICENSE", "scripts/modernz-LICENSE.txt"))
+    for name in SCRIPT_PLUGINS:
+        pairs.append((PLUGINS / name / "LICENSE", f"scripts/{name}/LICENSE"))
     pairs.extend(FILES)
     missing = [str(src) for src, _ in pairs if not src.is_file()]
     if missing:
@@ -63,19 +68,17 @@ def same(a: Path, b: Path):
 
 
 def migrate_legacy(target: Path, dry_run: bool):
-    """Move the old-named plugins out of the way. Returns how many things changed."""
+    """Move the old-named plugins out of scripts/ (mpv would load both) into a backup folder."""
     changed = 0
+    stamp = datetime.date.today().isoformat()
     for old, new in LEGACY.items():
         old_dir = target / "scripts" / old
         if old_dir.is_dir():
             changed += 1
-            print(f"remove scripts/{old}/   (replaced by scripts/{new}/)")
-            backup = old_dir / "backup"      # clipper's saved original controller, if any
+            backup = target / f"backup-{old}-{stamp}"
+            print(f"move   scripts/{old}/ -> {backup.name}/   (replaced by scripts/{new}/)")
             if not dry_run:
-                if backup.is_dir():
-                    (target / "scripts" / new).mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(backup, target / "scripts" / new / "backup", dirs_exist_ok=True)
-                shutil.rmtree(old_dir)
+                shutil.move(str(old_dir), str(backup))
         old_conf, new_conf = target / "script-opts" / f"{old}.conf", target / "script-opts" / f"{new}.conf"
         if old_conf.is_file():
             changed += 1
@@ -86,6 +89,24 @@ def migrate_legacy(target: Path, dry_run: bool):
                 if not dry_run:
                     old_conf.rename(new_conf)
     return changed
+
+
+# old script name (as used in script-message-to / script-binding) -> new
+OLD_NAMES = {"twitch_dvr": "twitch_rewind", "clip_window": "clipper", "clip-window": "clipper", "twitch-dvr": "twitch-rewind"}
+
+
+def old_names_in_use(target: Path):
+    """input.conf bindings that still use the old script names stopped working; list them."""
+    for name in ("input.conf", "menu.conf"):
+        path = target / name
+        if not path.is_file():
+            continue
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            for old, new in OLD_NAMES.items():
+                if old in line:
+                    print(f"update {name}:{number}: '{old}' is now '{new}'")
 
 
 def main():
@@ -99,6 +120,7 @@ def main():
         sys.exit(f"mpv folder not found: {target}")
 
     changed = migrate_legacy(target, args.dry_run)
+    old_names_in_use(target)
     for src, rel in collect():
         dest = target / rel
         if same(src, dest):
