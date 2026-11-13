@@ -1,0 +1,19 @@
+mpv_install/
+
+.old
+.vscode
+.test
+__pycache__
+*.pyc
+*.log
+
+# build output and local notes
+dist/
+*.zip
+*.bak
+
+# notes and specs written for coding agents, not for users
+HANDOFF*.md
+AGENTS.md
+CLAUDE.md
+plugins/clipper/docs/design-spec.md
