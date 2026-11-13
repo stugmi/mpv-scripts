@@ -29,11 +29,14 @@ jobs:
             luajit -bl "$f" > /dev/null
           done
 
+      # tag -> the tag name; push to the default branch -> "latest"; anything else -> short commit hash
       - name: Version label
         id: version
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             echo "label=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF}" = "refs/heads/master" ] || [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            echo "label=latest" >> "$GITHUB_OUTPUT"
           else
             echo "label=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           fi
@@ -60,6 +63,7 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+  # A pushed v* tag publishes a numbered release.
   release:
     if: github.ref_type == 'tag'
     needs: package
@@ -77,3 +81,30 @@ jobs:
         with:
           files: dist/*.zip
           generate_release_notes: true
+
+  # Every push to the default branch refreshes one rolling release called "latest": the zip is a build of
+  # that commit, ready to extract into the mpv config folder. The "latest" tag moves to the new commit.
+  latest:
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: latest-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: twitch-rewind-clipper-*
+          path: dist
+          merge-multiple: true
+
+      - name: Replace the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create latest dist/*.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Latest build" \
+            --notes "Automatic build of ${GITHUB_SHA::7}. Extract the zip into your mpv config folder (INSTALL-twitch-rewind-clipper.txt inside explains the rest). For a numbered version, see the other releases."

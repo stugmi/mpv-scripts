@@ -18,7 +18,7 @@ The scripts also work separately. twitch-rewind and clipper run under any OSC; t
 
 ## Install
 
-Download `twitch-rewind-clipper-<version>.zip` from the [releases page](../../releases) and extract it into your mpv config folder (`%APPDATA%\mpv` on Windows, `~/.config/mpv` on Linux), or from a checkout:
+Download `twitch-rewind-clipper-latest.zip` (always the newest commit, release "Latest build") or a numbered `twitch-rewind-clipper-<version>.zip` from the [releases page](../../releases) and extract it into your mpv config folder (`%APPDATA%\mpv` on Windows, `~/.config/mpv` on Linux), or from a checkout:
 
 ```text
 py tools/install.py             # copy the scripts into %APPDATA%\mpv (use --target for another folder)
@@ -37,7 +37,7 @@ plugins/clipper/         scripts/clipper/        script-opts/clipper.conf       
 plugins/ModernZ/         ModernZ with the Twitch/Clip changes (upstream layout; see below)
 tools/                   install.py, package.py, check_zip.py
 assets/                  Material Design Iconic Font (+ its OFL license), used by the ModernZ fork
-.github/workflows/       release.yml: checks and builds the zip on every push and pull request; a `v*` tag also publishes it as a release
+.github/workflows/    release.yml: checks and builds the zip on every push and pull request; pushes to master refresh the "Latest build" release, `v*` tags publish numbered releases
 ```
 
 `git diff d93e5b3 -- plugins/ModernZ` lists every change made to ModernZ; that commit is the unmodified upstream copy.
