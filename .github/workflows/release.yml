@@ -29,7 +29,8 @@ jobs:
             luajit -bl "$f" > /dev/null
           done
 
-      # tag -> the tag name; push to the default branch -> "latest"; anything else -> short commit hash
+      # tag -> the tag name; push to the default branch -> "latest" (a fixed name, so the download link is
+      # stable); anything else -> short commit hash
       - name: Version label
         id: version
         run: |
@@ -64,7 +65,7 @@ jobs:
           if-no-files-found: error
 
   # A pushed v* tag publishes a numbered release.
-  release:
+  release_tag:
     if: github.ref_type == 'tag'
     needs: package
     runs-on: ubuntu-latest
@@ -82,16 +83,17 @@ jobs:
           files: dist/*.zip
           generate_release_notes: true
 
-  # Every push to the default branch refreshes one rolling release called "latest": the zip is a build of
-  # that commit, ready to extract into the mpv config folder. The "latest" tag moves to the new commit.
-  latest:
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+  # A push to the default branch refreshes one rolling release called "latest": the zip is a build of that
+  # commit, ready to extract into the mpv config folder. The release is updated in place (tag moved, asset
+  # replaced), so it never disappears while the job runs. The tag is named "latest", which does not match v*.
+  release_latest:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
     needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: write
     concurrency:
-      group: latest-release
+      group: rolling-latest
       cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@v4
@@ -100,11 +102,21 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Replace the "latest" release
+      - name: Update the "latest" release
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          gh release delete latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
-          gh release create latest dist/*.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Latest build" \
-            --notes "Automatic build of ${GITHUB_SHA::7}. Extract the zip into your mpv config folder (INSTALL-twitch-rewind-clipper.txt inside explains the rest). For a numbered version, see the other releases."
+          set -euo pipefail
+          notes="Automatic build of ${GITHUB_SHA::7} (https://github.com/${REPO}/commit/${GITHUB_SHA}). Extract the zip into your mpv config folder; INSTALL-twitch-rewind-clipper.txt inside explains the rest. Numbered versions are the other releases."
+          if gh api "repos/${REPO}/git/ref/tags/latest" > /dev/null 2>&1; then
+            gh api -X PATCH "repos/${REPO}/git/refs/tags/latest" -f sha="${GITHUB_SHA}" -F force=true > /dev/null
+          else
+            gh api -X POST "repos/${REPO}/git/refs" -f ref="refs/tags/latest" -f sha="${GITHUB_SHA}" > /dev/null
+          fi
+          if gh release view latest --repo "${REPO}" > /dev/null 2>&1; then
+            gh release edit latest --repo "${REPO}" --title "Latest build" --notes "${notes}"
+            gh release upload latest dist/*.zip --repo "${REPO}" --clobber
+          else
+            gh release create latest dist/*.zip --repo "${REPO}" --verify-tag --title "Latest build" --notes "${notes}"
+          fi
