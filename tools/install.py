@@ -28,6 +28,7 @@ SCRIPT_PLUGINS = ["twitch-rewind", "clipper"]
 FILES = [
     (PLUGINS / "ModernZ" / "modernz.lua", "scripts/modernz.lua"),
     (PLUGINS / "ModernZ" / "modernz-icons.ttf", "fonts/modernz-icons.ttf"),
+    (ROOT / "assets" / "Material-Design-Iconic-Font.ttf", "fonts/Material-Design-Iconic-Font.ttf"),
 ]
 # name before the rename -> name now
 LEGACY = {"twitch-dvr": "twitch-rewind", "clip-window": "clipper"}

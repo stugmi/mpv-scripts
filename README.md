@@ -18,14 +18,14 @@ The scripts also work separately. twitch-rewind and clipper run under any OSC; t
 
 ## Install
 
-Download the zip from the releases page and extract it into your mpv config folder (`%APPDATA%\mpv` on Windows, `~/.config/mpv` on Linux), or from a checkout:
+Download `twitch-rewind-clipper-<version>.zip` from the [releases page](../../releases) and extract it into your mpv config folder (`%APPDATA%\mpv` on Windows, `~/.config/mpv` on Linux), or from a checkout:
 
 ```text
 py tools/install.py             # copy the scripts into %APPDATA%\mpv (use --target for another folder)
-py tools/package.py             # build dist/twitch-rewind-clipper-<date>.zip to share
+py tools/package.py             # build dist/twitch-rewind-clipper-<date>.zip (the release workflow runs this)
 ```
 
-`install.py` never overwrites your `mpv.conf` or `script-opts`; a differing `modernz.lua` is kept as `modernz.lua.bak`. If you used the earlier names (`twitch-dvr`, `clip-window`) it removes those folders and renames their config files. The zip ships `.example` configs and an install note.
+`install.py` never overwrites your `mpv.conf` or `script-opts`; a differing `modernz.lua` is kept as `modernz.lua.bak`. If you used the earlier names (`twitch-dvr`, `clip-window`) it moves those folders to `backup-<name>-<date>/`, renames their config files and lists `input.conf` lines that need the new names. The zip ships `.example` configs and an install note.
 
 ## Layout
 
@@ -36,6 +36,8 @@ plugins/twitch-rewind/   scripts/twitch-rewind/  script-opts/twitch-rewind.conf 
 plugins/clipper/         scripts/clipper/        script-opts/clipper.conf        README.md  docs/
 plugins/ModernZ/         ModernZ with the Twitch/Clip changes (upstream layout; see below)
 tools/                   install.py, package.py
+assets/                  Material icon font used by the ModernZ fork
+.github/workflows/       release.yml: builds the zip on every push of a `v*` tag and attaches it to the release
 ```
 
 `git diff d93e5b3 -- plugins/ModernZ` lists every change made to ModernZ; that commit is the unmodified upstream copy.

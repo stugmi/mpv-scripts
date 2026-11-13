@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Build a zip to share. Extract it into an mpv config folder (%APPDATA%\\mpv) and restart mpv.
+"""Build the zip to share. Extract it into an mpv config folder (%APPDATA%\\mpv) and restart mpv.
 
-    py tools/package.py                         # dist/twitch-rewind-clipper-<date>.zip
-    py tools/package.py --material-font PATH    # where to take Material-Design-Iconic-Font.ttf from
+    py tools/package.py                      # dist/twitch-rewind-clipper-<date>.zip
+    py tools/package.py --version v1.0       # dist/twitch-rewind-clipper-v1.0.zip
 
-The zip holds the same files tools/install.py installs, plus the Material icon font the patched
-ModernZ uses for play/pause (taken from your mpv fonts folder), sample configs with a .example suffix
-so nothing of the friend's is overwritten, and an INSTALL text.
+The zip holds the same files tools/install.py installs, sample configs with a .example suffix so
+nothing of the recipient's is overwritten, and an install text. The GitHub workflow runs this script.
 """
 import argparse
 import datetime
@@ -61,26 +60,21 @@ Notes
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=install.ROOT / "dist", help="output folder (default: %(default)s)")
-    parser.add_argument("--material-font", type=Path, default=install.default_target() / "fonts" / "Material-Design-Iconic-Font.ttf",
-                        help="Material-Design-Iconic-Font.ttf to include (default: %(default)s)")
+    parser.add_argument("--version", default=datetime.date.today().isoformat(),
+                        help="label in the zip name, e.g. a tag like v1.0 (default: today's date)")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.datetime.now()
-    zip_path = args.out / f"twitch-rewind-clipper-{stamp:%Y-%m-%d}.zip"
+    zip_path = args.out / f"twitch-rewind-clipper-{args.version}.zip"
     try:
         zip_path.open("ab").close()   # fails while another program (for example 7-Zip) has the old zip open
     except PermissionError:
-        zip_path = args.out / f"twitch-rewind-clipper-{stamp:%Y-%m-%d-%H%M%S}.zip"
+        zip_path = args.out / f"twitch-rewind-clipper-{args.version}-{datetime.datetime.now():%H%M%S}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for src, rel in install.collect():
             z.write(src, rel)
         for src, name in install.sample_configs():
             z.write(src, f"script-opts/{name}.example")
-        if args.material_font.is_file():
-            z.write(args.material_font, "fonts/Material-Design-Iconic-Font.ttf")
-        else:
-            print(f"warning: {args.material_font} not found; the play/pause icon will be missing", file=sys.stderr)
         z.writestr("INSTALL-twitch-rewind-clipper.txt", INSTALL_TEXT)
     print(f"{zip_path} ({zip_path.stat().st_size / 1048576:.1f} MiB)")
 

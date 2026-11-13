@@ -1,0 +1,54 @@
+name: Build zip
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Version label
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "label=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "label=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build zip
+        run: python tools/package.py --version "${{ steps.version.outputs.label }}"
+
+      - name: Smoke test (install into an empty mpv folder)
+        run: |
+          mkdir -p "$RUNNER_TEMP/mpv-test"
+          python tools/install.py --target "$RUNNER_TEMP/mpv-test"
+          test -f "$RUNNER_TEMP/mpv-test/scripts/twitch-rewind/main.lua"
+          test -f "$RUNNER_TEMP/mpv-test/scripts/clipper/main.lua"
+          test -f "$RUNNER_TEMP/mpv-test/scripts/modernz.lua"
+          test -f "$RUNNER_TEMP/mpv-test/fonts/Material-Design-Iconic-Font.ttf"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twitch-rewind-clipper-${{ steps.version.outputs.label }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
